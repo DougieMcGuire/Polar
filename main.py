@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import os
 import logging
+import re
 from werkzeug.utils import secure_filename
 
 # Configure logging
@@ -13,44 +14,102 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-# Increase maximum file size to 200MB
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-def process_with_ffmpeg(input_path, output_path):
-    """Process video with FFmpeg using more reliable settings"""
+# Define safe FFmpeg filters and options
+SAFE_FILTERS = {
+    'drawtext', 'scale', 'crop', 'rotate', 'transpose', 'hflip', 'vflip',
+    'colorbalance', 'eq', 'hue', 'overlay', 'pad', 'trim', 'setpts',
+    'volume', 'afade', 'areverse', 'atempo', 'fade', 'colorize', 'format',
+    'fps', 'reverse', 'setdar', 'setsar', 'sharpen', 'unsharp', 'zoompan'
+}
+
+SAFE_CODECS = {
+    'libx264', 'libx265', 'aac', 'libmp3lame', 'libvorbis', 'libvpx', 
+    'libvpx-vp9', 'libopus', 'copy'
+}
+
+def sanitize_ffmpeg_command(command_str):
+    """
+    Sanitize and validate FFmpeg command string
+    Returns (is_safe, sanitized_command or error_message)
+    """
     try:
-        # First, probe the input file
-        probe_command = [
-            'ffmpeg',
-            '-i', input_path,
-            '-v', 'error'
-        ]
+        # Split command while preserving quoted strings
+        parts = []
+        current = []
+        in_quotes = False
+        i = 0
         
-        probe_result = subprocess.run(
-            probe_command,
-            capture_output=True,
-            text=True
-        )
-        
-        if probe_result.stderr:
-            logger.warning(f"FFmpeg probe warnings: {probe_result.stderr}")
-        
-        # Main FFmpeg command with more reliable settings
-        command = [
-            'ffmpeg',
-            '-y',  # Overwrite output
-            '-i', input_path,
-            '-vf', "drawtext=text='Hello!':fontcolor=white:fontsize=24:x=10:y=10:box=1:boxcolor=black@0.5",
-            '-c:v', 'libx264',  # Explicitly set video codec
-            '-preset', 'ultrafast',  # Faster encoding
-            '-crf', '23',  # Balance quality/size
-            '-c:a', 'aac',  # Explicitly set audio codec
-            '-movflags', '+faststart',  # Web optimized
-            '-max_muxing_queue_size', '1024',  # Prevent muxing errors
-            output_path
-        ]
-        
+        while i < len(command_str):
+            if command_str[i] in ['"', "'"]:
+                in_quotes = not in_quotes
+                i += 1
+                continue
+            elif command_str[i].isspace() and not in_quotes:
+                if current:
+                    parts.append(''.join(current))
+                    current = []
+                i += 1
+                continue
+            current.append(command_str[i])
+            i += 1
+            
+        if current:
+            parts.append(''.join(current))
+
+        # Basic security checks
+        for part in parts:
+            # Check for suspicious patterns
+            if any(pattern in part.lower() for pattern in [
+                ';', '&&', '||', '|', '>', '<', '$', '`', '$(', '${',
+                'rm ', 'mv ', 'cp ', '/bin/', '/etc/', '/dev/', '/sys/',
+                'sudo', 'bash', 'sh '
+            ]):
+                return False, "Command contains forbidden characters or patterns"
+
+            # Validate filter names if -vf or -filter:v is used
+            if part.startswith('filter:') or part.startswith('vf='):
+                filter_str = part.split('=', 1)[1]
+                filter_names = re.findall(r'([a-zA-Z]+)(?:=|:|\,|\s|$)', filter_str)
+                for filter_name in filter_names:
+                    if filter_name not in SAFE_FILTERS:
+                        return False, f"Filter '{filter_name}' is not allowed"
+
+            # Validate codec names
+            if part.startswith('c:') or part.startswith('codec:'):
+                codec = part.split('=', 1)[1]
+                if codec not in SAFE_CODECS:
+                    return False, f"Codec '{codec}' is not allowed"
+
+        return True, parts
+
+    except Exception as e:
+        logger.error(f"Error sanitizing command: {str(e)}")
+        return False, "Invalid command format"
+
+def process_with_ffmpeg(input_path, output_path, custom_command=None):
+    """Process video with FFmpeg using optional custom command"""
+    try:
+        if custom_command:
+            is_safe, command_parts = sanitize_ffmpeg_command(custom_command)
+            if not is_safe:
+                return False, f"Invalid command: {command_parts}"
+            
+            # Build complete command
+            command = ['ffmpeg', '-y', '-i', input_path]
+            command.extend(command_parts)
+            command.append(output_path)
+        else:
+            # Default command as fallback
+            command = [
+                'ffmpeg', '-y', '-i', input_path,
+                '-vf', "drawtext=text='Hello!':fontcolor=white:fontsize=24:x=10:y=10:box=1:boxcolor=black@0.5",
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+                '-c:a', 'aac', '-movflags', '+faststart',
+                output_path
+            ]
+
         logger.info(f"Running FFmpeg command: {' '.join(command)}")
         
         process = subprocess.Popen(
@@ -60,7 +119,7 @@ def process_with_ffmpeg(input_path, output_path):
             universal_newlines=True
         )
         
-        # Monitor the FFmpeg process
+        # Monitor FFmpeg process
         while True:
             stderr_line = process.stderr.readline()
             if not stderr_line and process.poll() is not None:
@@ -72,10 +131,8 @@ def process_with_ffmpeg(input_path, output_path):
         
         if return_code != 0:
             _, stderr = process.communicate()
-            logger.error(f"FFmpeg failed with return code {return_code}: {stderr}")
             return False, stderr
         
-        # Verify output file exists and has size
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             return False, "Output file is missing or empty"
             
@@ -87,21 +144,31 @@ def process_with_ffmpeg(input_path, output_path):
 
 @app.route('/')
 def home():
-    """Basic homepage with API instructions"""
+    """API documentation homepage"""
     return jsonify({
         "status": "active",
         "usage": {
             "endpoint": "POST /process",
             "content-type": "multipart/form-data",
-            "field": "video",
+            "fields": {
+                "video": "Video file to process",
+                "command": "(Optional) FFmpeg command string"
+            },
             "supported_formats": ["mp4", "mov", "avi"],
-            "max_size": "200MB"
+            "max_size": "200MB",
+            "safe_filters": list(SAFE_FILTERS),
+            "safe_codecs": list(SAFE_CODECS),
+            "example_commands": [
+                "-vf scale=720:-1 -c:v libx264 -preset faster -crf 23",
+                "-vf rotate=45 -c:v libx264 -c:a copy",
+                "-vf colorbalance=rs=0.5 -c:v libx264"
+            ]
         }
     })
 
 @app.route('/process', methods=['POST'])
 def process_video():
-    """Process video endpoint with improved error handling"""
+    """Process video endpoint with custom command support"""
     logger.info("Received video processing request")
     
     if 'video' not in request.files:
@@ -111,6 +178,7 @@ def process_video():
         }), 400
     
     video_file = request.files['video']
+    custom_command = request.form.get('command')
     
     if video_file.filename == '':
         return jsonify({
@@ -119,7 +187,6 @@ def process_video():
         }), 400
     
     try:
-        # Create temporary directory for processing
         with tempfile.TemporaryDirectory() as temp_dir:
             input_path = os.path.join(temp_dir, 'input.mp4')
             output_path = os.path.join(temp_dir, 'output.mp4')
@@ -134,7 +201,7 @@ def process_video():
                 }), 500
             
             logger.info("Starting FFmpeg processing")
-            success, error_message = process_with_ffmpeg(input_path, output_path)
+            success, error_message = process_with_ffmpeg(input_path, output_path, custom_command)
             
             if not success:
                 return jsonify({
