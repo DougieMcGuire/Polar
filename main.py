@@ -2,6 +2,7 @@ from flask import Flask, request, send_file, jsonify
 import ffmpeg
 import os
 import traceback
+import uuid
 
 app = Flask(__name__)
 
@@ -17,7 +18,10 @@ def process_video():
 
         # Define paths
         input_path = os.path.join(os.getcwd(), file.filename)
-        output_path = os.path.join(os.getcwd(), f"processed_{file.filename}")
+
+        # Generate a unique filename for the output (to prevent overwriting)
+        output_filename = f"processed_{uuid.uuid4().hex}_{file.filename}"
+        output_path = os.path.join(os.getcwd(), output_filename)
 
         # Save the video to the server
         file.save(input_path)
