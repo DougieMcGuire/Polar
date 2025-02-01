@@ -30,4 +30,4 @@ def process_video():
         return send_file(output_tmp.name, mimetype='video/mp4', as_attachment=True, download_name='output.mp4')
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=8080)
