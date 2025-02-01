@@ -1,59 +1,43 @@
-from flask import Flask, request, send_file, jsonify
-import ffmpeg
-import os
-import traceback
-import uuid
+import io
+import subprocess
+from flask import Flask, request, send_file
 
 app = Flask(__name__)
 
-@app.route('/process', methods=['POST'])
-def process_video():
-    """Receives a video, applies FFmpeg processing, and returns the output."""
-    try:
-        if 'video' not in request.files:
-            return jsonify({"error": "No video uploaded"}), 400
+@app.route('/edit-video', methods=['POST'])
+def edit_video():
+    # Step 1: Get the video file from the request
+    file = request.files.get('video')
+    if file is None:
+        return "No video file provided", 400
 
-        # Get the uploaded video file
-        file = request.files['video']
+    # Step 2: Read the file into memory
+    video_input = io.BytesIO(file.read())
+    
+    # Step 3: Use FFmpeg to edit the video (as an example, we'll just add a watermark)
+    output = io.BytesIO()
+    command = [
+        'ffmpeg',
+        '-i', 'pipe:0',  # input from stdin (pipe)
+        '-vf', "drawtext=text='Watermark':fontcolor=white@0.5:fontsize=24:x=10:y=10",  # example filter to add watermark
+        '-f', 'mp4',  # output format
+        'pipe:1'  # output to stdout (pipe)
+    ]
+    
+    # Step 4: Run FFmpeg process
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = process.communicate(input=video_input.read())
+    
+    # Step 5: Handle any errors
+    if process.returncode != 0:
+        return f"Error in video processing: {err.decode()}", 500
 
-        # Define paths
-        input_path = os.path.join(os.getcwd(), file.filename)
-
-        # Generate a unique filename for the output (to prevent overwriting)
-        output_filename = f"processed_{uuid.uuid4().hex}_{file.filename}"
-        output_path = os.path.join(os.getcwd(), output_filename)
-
-        # Save the video to the server
-        file.save(input_path)
-
-        # Ensure the file was saved
-        if not os.path.exists(input_path):
-            return jsonify({"error": f"Failed to save the file: {input_path}"}), 500
-
-        # Apply FFmpeg: Add text to the video
-        print(f"Running FFmpeg on {input_path}...")
-
-        # Run FFmpeg and capture output and errors
-        try:
-            ffmpeg.input(input_path).output(output_path, vf="drawtext=text='Hello World':x=10:y=10:fontsize=24:fontcolor=white").run(cmd='ffmpeg', capture_stdout=True, capture_stderr=True)
-        except ffmpeg.Error as e:
-            # Capture detailed FFmpeg error logs
-            print(f"FFmpeg error: {e.stderr.decode()}")
-            return jsonify({"error": f"FFmpeg failed to process the video: {e.stderr.decode()}"}), 500
-
-        # Check if the output file was created
-        if not os.path.exists(output_path):
-            return jsonify({"error": "FFmpeg failed to process the video."}), 500
-
-        # Return the processed video as an attachment
-        return send_file(output_path, as_attachment=True)
-
-    except Exception as e:
-        # Print stack trace for debugging
-        print(f"Error processing video: {e}")
-        print(traceback.format_exc())
-        return jsonify({"error": "Server error while processing the video."}), 500
+    # Step 6: Prepare the edited video for response
+    output.write(out)
+    output.seek(0)
+    
+    # Step 7: Send the edited video back as a response
+    return send_file(output, mimetype='video/mp4', as_attachment=True, download_name='edited_video.mp4')
 
 if __name__ == '__main__':
-    # Run the Flask app on all available IP addresses (to allow external requests)
-    app.run(host='0.0.0.0', port=8080)
+    app.run(debug=True)
