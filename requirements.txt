@@ -1,2 +1,4 @@
-flask
+
 ffmpeg-python
+Flask>=2.0.0
+Werkzeug>=2.0.0
