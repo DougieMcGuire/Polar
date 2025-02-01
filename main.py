@@ -33,8 +33,12 @@ def process_video():
         # Apply FFmpeg: Add text to the video
         print(f"Running FFmpeg on {input_path}...")
 
-        # Run FFmpeg and capture output
-        ffmpeg.input(input_path).output(output_path, vf="drawtext=text='Hello World':x=10:y=10:fontsize=24:fontcolor=white").run(cmd='ffmpeg', capture_stdout=True, capture_stderr=True)
+        # Run FFmpeg and capture output and errors
+        try:
+            ffmpeg.input(input_path).output(output_path, vf="drawtext=text='Hello World':x=10:y=10:fontsize=24:fontcolor=white").run(cmd='ffmpeg', capture_stdout=True, capture_stderr=True)
+        except ffmpeg.Error as e:
+            print(f"FFmpeg error: {e.stderr.decode()}")
+            return jsonify({"error": "FFmpeg failed to process the video."}), 500
 
         # Check if the output file was created
         if not os.path.exists(output_path):
